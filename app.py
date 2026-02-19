@@ -12,9 +12,8 @@ from fpdf import FPDF
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
 st.title("🍌 Banana Shire Council Tender Evaluator v2.4")
-st.markdown("**T2526.25 DRFA Moura – Part 6 Checklist**  \nUpload ZIPs (preferred) or multiple individual files")
+st.markdown("**T2526.25 DRFA Moura – Part 6 Checklist**  \nUpload ZIPs or multiple files")
 
-# Checklist
 checklist = {
     "Tender Form": "Signed offer, price, program",
     "A1-A4": "Details, Conflict, Legal, Privacy",
@@ -55,10 +54,7 @@ def extract_text_from_file(file_path):
 def llm_deep_score(full_text, tender_name):
     if not groq_key:
         return 0, {}, "No API key"
-    
-    prompt = f"""You are an expert tender evaluator.
-
-Evaluate this tender against the Banana Shire Council Part 6 checklist.
+    prompt = f"""Evaluate this tender response against the Part 6 checklist.
 
 Checklist:
 {chr(10).join([f"- {k}: {v}" for k, v in checklist.items()])}
@@ -85,7 +81,6 @@ Return ONLY valid JSON:
   }},
   "explanation": "Brief 2-3 sentence summary"
 }}"""
-
     for attempt in range(3):
         try:
             client = Groq(api_key=groq_key)
@@ -103,7 +98,7 @@ Return ONLY valid JSON:
     return 0, {}, "LLM failed after retries"
 
 # Upload
-uploaded = st.file_uploader("Upload ZIP files (one tender per ZIP with folders) or multiple individual files", 
+uploaded = st.file_uploader("Upload ZIP files (one tender per ZIP) or multiple files", 
                            accept_multiple_files=True, type=['zip', 'pdf', 'xlsx', 'docx'])
 
 if uploaded and groq_key:
@@ -113,7 +108,6 @@ if uploaded and groq_key:
     for i, file in enumerate(uploaded):
         tender_name = file.name.replace(".zip", "") if file.name.endswith(".zip") else file.name.split('.')[0]
         full_text = ""
-        category_texts = {cat: "" for cat in checklist.keys()}
         
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -122,22 +116,11 @@ if uploaded and groq_key:
                     zip_ref.extractall(tmpdir)
                 for f in tmp_path.rglob("*"):
                     if f.is_file():
-                        text = extract_text_from_file(f)
-                        full_text += text + "\n"
-                        # Auto-detect category
-                        for cat in checklist.keys():
-                            if any(word in f.name.lower() for word in cat.lower().split("-") + cat.lower().split()):
-                                category_texts[cat] += text + "\n"
-                                break
+                        full_text += extract_text_from_file(f) + "\n"
             else:
                 with open(tmp_path / file.name, "wb") as f:
                     f.write(file.getbuffer())
-                text = extract_text_from_file(tmp_path / file.name)
-                full_text = text
-                for cat in checklist.keys():
-                    if any(word in file.name.lower() for word in cat.lower().split()):
-                        category_texts[cat] = text
-                        break
+                full_text = extract_text_from_file(tmp_path / file.name)
         
         llm_score, item_scores, explanation = llm_deep_score(full_text, tender_name)
         
@@ -156,12 +139,14 @@ if uploaded and groq_key:
     st.subheader("🏆 Automatic Ranking")
     ranked_df = df.sort_values(by="Overall Score", ascending=False).reset_index(drop=True)
     ranked_df["Rank"] = ranked_df.index + 1
-    st.dataframe(
-        ranked_df.style.background_gradient(subset=["Overall Score"], cmap="RdYlGn")
-        .format({"Overall Score": "{:.1f}"}),
-        use_container_width=True,
-        height=600
-    )
+    
+    # Safe styling with fallback
+    try:
+        styled = ranked_df.style.background_gradient(subset=["Overall Score"], cmap="RdYlGn")
+    except:
+        styled = ranked_df.style
+    
+    st.dataframe(styled.format({"Overall Score": "{:.1f}"}), use_container_width=True, height=600)
     
     # Side-by-side + Per-Category Table
     st.subheader("🔍 Detailed Comparison")
@@ -173,11 +158,11 @@ if uploaded and groq_key:
         
         st.subheader("📋 Per-Category Scoring Table")
         cat_df = compare_df[["Tender Name"] + list(checklist.keys())].set_index("Tender Name")
-        st.dataframe(
-            cat_df.style.background_gradient(cmap="RdYlGn", axis=None)
-            .format("{:.1f}"),
-            use_container_width=True
-        )
+        try:
+            styled_cat = cat_df.style.background_gradient(cmap="RdYlGn", axis=None)
+        except:
+            styled_cat = cat_df
+        st.dataframe(styled_cat.format("{:.1f}"), use_container_width=True)
         
         # PDF Export
         if st.button("📄 Export Full Comparison Report as PDF"):
@@ -186,7 +171,6 @@ if uploaded and groq_key:
             pdf.set_font("Arial", "B", 16)
             pdf.cell(0, 10, "Banana Shire Council Tender Comparison Report", ln=True, align="C")
             pdf.ln(10)
-            
             pdf.set_font("Arial", "B", 12)
             pdf.cell(0, 10, "Ranked Results", ln=True)
             for _, row in ranked_df.iterrows():
@@ -205,4 +189,4 @@ if uploaded and groq_key:
             with open("comparison_report.pdf", "rb") as f:
                 st.download_button("Download PDF Report", f, "comparison_report.pdf", "application/pdf")
     
-    st.success(f"✅ Evaluated {len(uploaded)} tenders with automatic ranking & colour coding")
+    st.success(f"✅ Evaluated {len(uploaded)} tenders")
