@@ -6,12 +6,15 @@ from pathlib import Path
 from groq import Groq
 import json
 import time
+import zipfile
+import io
+import os
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v3.7")
-st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nSimple Mode: unlimited documents • Detailed Mode: multiple per schedule")
+st.title("🍌 Banana Shire Council Tender Evaluator v3.9")
+st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nUnlimited files • Delete Tenders • Save / Load Full Session")
 
-# Official Weightings
+# Official Weightings from RFT
 criteria_weighting = {
     "Price": 50,
     "Experience & Capability": 10,
@@ -20,7 +23,7 @@ criteria_weighting = {
     "Local Content": 10
 }
 
-# Schedules from Part 6
+# Exact Schedules from Part 6
 schedules = [
     "Tender Form",
     "Schedule A – Respondent’s Details, Conflict of Interest and Legal Matters",
@@ -127,22 +130,111 @@ if st.button("Add Tender") and new_name.strip():
         st.session_state.tenders[new_name] = {sched: [] for sched in schedules}
         st.success(f"Added {new_name}")
 
-# Upload Section
+# Upload & Delete Section
 for tender in list(st.session_state.tenders.keys()):
     with st.expander(f"📂 {tender}", expanded=True):
-        if mode == "Simple Mode (unlimited documents)":
-            files = st.file_uploader("Upload documents (unlimited)", 
-                                   key=f"simple_{tender}", 
-                                   accept_multiple_files=True)
-            st.session_state.tenders[tender]["Main Documents"] = files if files else []
-        else:
-            for sched in schedules:
-                files = st.file_uploader(f"{sched} (multiple allowed)", 
-                                       key=f"{tender}_{sched}", 
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            if mode == "Simple Mode (unlimited documents)":
+                files = st.file_uploader("Upload documents (unlimited)", 
+                                       key=f"simple_{tender}", 
                                        accept_multiple_files=True)
-                st.session_state.tenders[tender][sched] = files if files else []
+                st.session_state.tenders[tender]["Main Documents"] = files if files else []
+            else:
+                for sched in schedules:
+                    files = st.file_uploader(f"{sched} (multiple allowed)", 
+                                           key=f"{tender}_{sched}", 
+                                           accept_multiple_files=True)
+                    st.session_state.tenders[tender][sched] = files if files else []
+        with col2:
+            if st.button("🗑️ Delete", key=f"del_{tender}"):
+                if st.session_state.tenders.pop(tender, None):
+                    st.success(f"Deleted {tender}")
+                    st.rerun()
 
-# Evaluate
+# Save / Load Session
+st.subheader("💾 Session Management")
+col_save, col_load = st.columns(2)
+
+with col_save:
+    if st.button("💾 Save Current Session"):
+        if not st.session_state.tenders:
+            st.warning("Nothing to save")
+        else:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                manifest = {"tenders": {}}
+                
+                for tender_name, data in st.session_state.tenders.items():
+                    manifest["tenders"][tender_name] = {}
+                    tender_path = tmp_path / tender_name
+                    tender_path.mkdir()
+                    
+                    for sched, file_list in data.items():
+                        manifest["tenders"][tender_name][sched] = []
+                        if file_list:
+                            sched_path = tender_path / sched.replace("/", "_").replace(" ", "_")
+                            sched_path.mkdir(exist_ok=True)
+                            for i, file in enumerate(file_list):
+                                file_path = sched_path / file.name
+                                with open(file_path, "wb") as f:
+                                    f.write(file.getbuffer())
+                                manifest["tenders"][tender_name][sched].append(file.name)
+                
+                with open(tmp_path / "manifest.json", "w") as f:
+                    json.dump(manifest, f, indent=2)
+                
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zipf:
+                    for root, dirs, files in os.walk(tmp_path):
+                        for file in files:
+                            file_path = Path(root) / file
+                            arcname = file_path.relative_to(tmp_path)
+                            zipf.write(file_path, arcname)
+                
+                zip_buffer.seek(0)
+                st.download_button(
+                    label="📥 Download Session Backup ZIP",
+                    data=zip_buffer,
+                    file_name="tender_session_backup.zip",
+                    mime="application/zip"
+                )
+
+with col_load:
+    uploaded_zip = st.file_uploader("📂 Load Saved Session (ZIP)", type=["zip"])
+    if uploaded_zip and st.button("Restore Session"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            with zipfile.ZipFile(uploaded_zip, "r") as zip_ref:
+                zip_ref.extractall(tmp_path)
+            
+            manifest_path = tmp_path / "manifest.json"
+            if manifest_path.exists():
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+                
+                st.session_state.tenders = {}
+                for tender_name, sched_data in manifest["tenders"].items():
+                    st.session_state.tenders[tender_name] = {sched: [] for sched in schedules}
+                    for sched, filenames in sched_data.items():
+                        for fname in filenames:
+                            file_path = tmp_path / tender_name / sched.replace("/", "_").replace(" ", "_") / fname
+                            if file_path.exists():
+                                with open(file_path, "rb") as f:
+                                    bytes_data = f.read()
+                                # Create fake UploadedFile
+                                fake_file = type('obj', (object,), {
+                                    'name': fname,
+                                    'getbuffer': lambda b=bytes_data: b
+                                })()
+                                st.session_state.tenders[tender_name][sched].append(fake_file)
+                
+                st.success("✅ Session restored successfully!")
+                st.rerun()
+            else:
+                st.error("Invalid backup file")
+
+# ==================== EVALUATE SECTION ====================
 if st.button("🚀 Evaluate All Tenders", type="primary"):
     if not st.session_state.tenders:
         st.error("No tenders added")
