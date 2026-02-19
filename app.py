@@ -8,10 +8,10 @@ import json
 import time
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v3.5")
-st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nMultiple files per schedule • Detailed Per-Criteria Breakdown")
+st.title("🍌 Banana Shire Council Tender Evaluator v3.6")
+st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nSimple Mode: max 3 documents • Detailed Mode: multiple per schedule")
 
-# Official Criteria & Weightings from RFT Part 2
+# Official Weightings
 criteria_weighting = {
     "Price": 50,
     "Experience & Capability": 10,
@@ -20,7 +20,7 @@ criteria_weighting = {
     "Local Content": 10
 }
 
-# All schedules from Part 6
+# Schedules from Part 6
 schedules = [
     "Tender Form",
     "Schedule A – Respondent’s Details, Conflict of Interest and Legal Matters",
@@ -57,7 +57,7 @@ schedules = [
 if 'tenders' not in st.session_state:
     st.session_state.tenders = {}
 
-mode = st.radio("Upload Mode", ["Simple Mode (One Main Document)", "Detailed Mode (Per Schedule)"], horizontal=True)
+mode = st.radio("Upload Mode", ["Simple Mode (max 3 documents)", "Detailed Mode (per schedule)"], horizontal=True)
 
 groq_key = st.text_input("Groq API Key", type="password")
 
@@ -84,9 +84,7 @@ def extract_text(file):
 def llm_deep_score(full_text, tender_name):
     if not groq_key:
         return 0, {}, "No API key"
-    prompt = f"""You are an expert tender evaluator for Banana Shire Council.
-
-Evaluate this tender against the official criteria and weightings:
+    prompt = f"""Evaluate this tender against the official criteria:
 
 - Price (50%)
 - Experience & Capability (10%)
@@ -132,12 +130,18 @@ if st.button("Add Tender") and new_name.strip():
 # Upload Section
 for tender in list(st.session_state.tenders.keys()):
     with st.expander(f"📂 {tender}", expanded=True):
-        if mode == "Simple Mode (One Main Document)":
-            file = st.file_uploader("Upload main document", key=f"simple_{tender}")
-            st.session_state.tenders[tender]["Main Document"] = [file] if file else []
+        if mode == "Simple Mode (max 3 documents)":
+            files = st.file_uploader("Upload up to 3 main documents", 
+                                   key=f"simple_{tender}", 
+                                   accept_multiple_files=True)
+            # Limit to maximum 3
+            limited_files = files[:3] if files else []
+            st.session_state.tenders[tender]["Main Documents"] = limited_files
+            if len(files or []) > 3:
+                st.warning("Only the first 3 files were kept (maximum allowed)")
         else:
             for sched in schedules:
-                files = st.file_uploader(f"{sched} (multiple files allowed)", 
+                files = st.file_uploader(f"{sched} (multiple allowed)", 
                                        key=f"{tender}_{sched}", 
                                        accept_multiple_files=True)
                 st.session_state.tenders[tender][sched] = files if files else []
@@ -152,15 +156,14 @@ if st.button("🚀 Evaluate All Tenders", type="primary"):
         
         for idx, (tender_name, schedules_dict) in enumerate(st.session_state.tenders.items()):
             full_text = ""
-            for sched, file_list in schedules_dict.items():
+            for cat_name, file_list in schedules_dict.items():
                 if file_list:
-                    full_text += f"\n\n=== {sched} ===\n"
+                    full_text += f"\n\n=== {cat_name} ===\n"
                     for file in file_list:
                         full_text += extract_text(file) + "\n"
             
             llm_score, criteria_scores, expl = llm_deep_score(full_text, tender_name)
             
-            # Calculate Official Weighted Score
             weighted = sum((criteria_scores.get(crit, 0) / 100) * weight 
                           for crit, weight in criteria_weighting.items())
             
@@ -169,7 +172,7 @@ if st.button("🚀 Evaluate All Tenders", type="primary"):
                 "Weighted Score": round(weighted, 1),
                 "LLM Overall": llm_score,
                 "Explanation": expl[:300] + "..." if len(expl) > 300 else expl,
-                **criteria_scores  # Add all criteria scores as columns
+                **criteria_scores
             }
             results.append(row)
             progress.progress((idx + 1) / len(st.session_state.tenders))
@@ -182,23 +185,13 @@ if st.button("🚀 Evaluate All Tenders", type="primary"):
         st.dataframe(ranked[["Rank", "Tender Name", "Weighted Score", "LLM Overall", "Explanation"]], 
                      use_container_width=True, height=600)
         
-        # Detailed Per-Criteria Breakdown
         st.subheader("📊 Detailed Per-Criteria Breakdown")
         selected = st.multiselect("Select tenders to compare", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:4])
         if selected:
             compare_df = df[df["Tender Name"].isin(selected)]
-            breakdown_cols = ["Tender Name"] + list(criteria_weighting.keys())
-            breakdown = compare_df[breakdown_cols].set_index("Tender Name")
+            breakdown = compare_df[["Tender Name"] + list(criteria_weighting.keys())].set_index("Tender Name")
             st.dataframe(breakdown.style.format("{:.1f}"), use_container_width=True)
-            
-            # Weighted Contribution
-            st.subheader("Weighted Contribution (%)")
-            contrib = {}
-            for crit, weight in criteria_weighting.items():
-                contrib[crit] = compare_df[crit] * (weight / 100)
-            contrib_df = pd.DataFrame(contrib, index=compare_df["Tender Name"])
-            st.dataframe(contrib_df.style.format("{:.1f}"), use_container_width=True)
         
         st.download_button("📥 Download Full Results CSV", df.to_csv(index=False), "evaluation_results.csv", "text/csv")
         
-        st.success("✅ Evaluation complete with official weighting and detailed breakdown")
+        st.success("✅ Evaluation complete")
