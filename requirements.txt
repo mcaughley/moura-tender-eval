@@ -1,5 +1,6 @@
 streamlit
+PyPDF2
 pandas
 openpyxl
-plotly
-reportlab
+python-docx
+groq
