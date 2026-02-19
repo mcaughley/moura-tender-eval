@@ -1,147 +1,131 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from datetime import datetime
-import io
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from PyPDF2 import PdfReader
+import re
+import tempfile
+import zipfile
+from pathlib import Path
+from groq import Groq
+import json
 
-st.set_page_config(page_title="Moura T25/26.25 Tender Evaluator", layout="wide")
+st.set_page_config(page_title="Tender Evaluator", layout="wide")
+st.title("🍌 Banana Shire Council Tender Evaluator v2.0")
+st.markdown("**T2526.25 DRFA Moura – Part 6 Response Schedules Checklist**  \nUpload ZIP files (one tender per ZIP) or individual files")
 
-# ==================== PASSWORD ====================
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+# Official Part 6 Checklist
+checklist = {
+    "Tender Form": "Signed offer, price, program",
+    "A1-A4": "Details, Conflict, Legal, Privacy",
+    "B1-B2": "Solvency & Financial Statements",
+    "C1-C2": "Insurances (WorkCover, PL, Construction)",
+    "D1-D3": "Local Content, Employment, Environmental",
+    "E1-E3": "Experience, Past Projects, Resources",
+    "F1-F2": "Key Personnel CVs & Allocation + Subs",
+    "G1-G3": "WHS, Environmental, Quality Systems",
+    "H": "Methodology",
+    "I": "Program / Gantt",
+    "J1-J3": "Pricing, Cash Flow, Variation Rates",
+    "K-O": "Technical Data, Departures, Additional, WHS Scheme, QLD Code"
+}
 
-if not st.session_state.authenticated:
-    st.title("🍃 Banana Shire Council – Moura Area Tender Evaluation")
-    pw = st.text_input("Enter password", type="password")
-    if st.button("Login"):
-        if pw == "banana2026":
-            st.session_state.authenticated = True
-            st.rerun()
+groq_key = st.text_input("Groq API Key (for LLM deep scoring)", type="password")
+
+def extract_text_from_file(file_path):
+    text = ""
+    try:
+        if file_path.suffix.lower() == ".pdf":
+            reader = PdfReader(str(file_path))
+            for page in reader.pages:
+                text += page.extract_text() or ""
+        elif file_path.suffix.lower() in [".xlsx", ".xls"]:
+            df = pd.read_excel(file_path)
+            text = df.to_string()
+        elif file_path.suffix.lower() in [".docx", ".doc"]:
+            from docx import Document
+            doc = Document(file_path)
+            text = "\n".join([para.text for para in doc.paragraphs])
         else:
-            st.error("Incorrect password")
-    st.stop()
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+    except:
+        pass
+    return text.lower()
 
-# ==================== DATA ====================
-if "tenderers" not in st.session_state:
-    st.session_state.tenderers = pd.DataFrame(columns=[
-        'Tenderer', 'ABN', 'Total Price Exc GST', 'Price Score',
-        'Experience Score', 'Understanding Score', 'Management Score',
-        'Local Content Score', 'Total Weighted Score', 'Notes', 'Last Updated'
-    ])
+def llm_deep_score(full_text, tender_name):
+    if not groq_key:
+        return 0, "No API key – LLM scoring disabled"
+    try:
+        client = Groq(api_key=groq_key)
+        prompt = f"""Evaluate this tender response for Banana Shire Council against the exact Part 6 checklist.
 
-df = st.session_state.tenderers
-COUNCIL_ESTIMATE = 3247850  # Pre-loaded from your tender list Excel
+Checklist:
+{chr(10).join([f"- {k}: {v}" for k, v in checklist.items()])}
 
-# ==================== TABS ====================
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard & Ranking", "➕ Add/Edit Tenderer", "📤 Upload K1 Excel", "✅ Compliance Checklist"])
+Tender: {tender_name}
+Text: {full_text[:12000]}
 
-with tab1:
-    st.header("Current Ranking")
-    if len(df) == 0:
-        st.info("No tenderers added yet")
-    else:
-        # Auto price scoring
-        if df['Total Price Exc GST'].sum() > 0:
-            min_price = df['Total Price Exc GST'].min()
-            df['Price Score'] = df['Total Price Exc GST'].apply(lambda x: round(50 * (min_price / x), 1) if x > 0 else 0)
-        
-        df['Total Weighted Score'] = (
-            df['Price Score'] * 0.50 +
-            df['Experience Score'] * 0.10 +
-            df['Understanding Score'] * 0.15 +
-            df['Management Score'] * 0.15 +
-            df['Local Content Score'] * 0.10
+Return ONLY JSON:
+{{
+  "overall_score": 0-100,
+  "explanation": "brief 2-3 sentence summary"
+}}"""
+
+        chat = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.1,
+            response_format={"type": "json_object"}
         )
+        data = json.loads(chat.choices[0].message.content)
+        return data.get("overall_score", 0), data.get("explanation", "")
+    except Exception as e:
+        return 0, f"LLM error: {str(e)}"
+
+# Upload handler
+uploaded = st.file_uploader("Upload ZIP files (one tender per ZIP) or individual files", 
+                           accept_multiple_files=True, type=['zip', 'pdf', 'xlsx', 'docx'])
+
+if uploaded and groq_key:
+    results = []
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(uploaded):
+        tender_name = file.name.replace(".zip", "") if file.name.endswith(".zip") else file.name.split('.')[0]
+        full_text = ""
         
-        ranked = df.sort_values('Total Weighted Score', ascending=False).reset_index(drop=True)
-        ranked.index = ranked.index + 1
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            if file.name.endswith(".zip"):
+                with zipfile.ZipFile(file, 'r') as zip_ref:
+                    zip_ref.extractall(tmpdir)
+                for f in tmp_path.rglob("*"):
+                    if f.is_file():
+                        full_text += extract_text_from_file(f) + "\n"
+            else:
+                with open(tmp_path / file.name, "wb") as f:
+                    f.write(file.getbuffer())
+                full_text = extract_text_from_file(tmp_path / file.name)
         
-        ranked['% of Council Estimate'] = (ranked['Total Price Exc GST'] / COUNCIL_ESTIMATE * 100).round(1)
+        # LLM Deep Score
+        llm_score, explanation = llm_deep_score(full_text, tender_name)
         
-        st.dataframe(ranked.style.format({
-            'Total Price Exc GST': '${:,.0f}',
-            'Total Weighted Score': '{:.1f}',
-            '% of Council Estimate': '{:.1f}%'
-        }).background_gradient(subset=['Total Weighted Score'], cmap='RdYlGn'), use_container_width=True)
-
-        # PDF Report
-        def create_pdf():
-            buffer = io.BytesIO()
-            c = canvas.Canvas(buffer, pagesize=A4)
-            c.setFont("Helvetica-Bold", 16)
-            c.drawString(50, 800, "Moura Area Tender Evaluation Report - T25/26.25")
-            c.setFont("Helvetica", 12)
-            c.drawString(50, 780, f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}")
-            c.drawString(50, 760, f"Council Estimate: ${COUNCIL_ESTIMATE:,.0f}")
-            
-            y = 720
-            for i, row in ranked.iterrows():
-                c.drawString(50, y, f"{i}. {row['Tenderer']} - ${row['Total Price Exc GST']:,.0f} ({row['% of Council Estimate']}% of estimate) - Score: {row['Total Weighted Score']:.1f}")
-                y -= 22
-            c.save()
-            buffer.seek(0)
-            return buffer.getvalue()
+        results.append({
+            "Tender Name": tender_name,
+            "LLM Deep Score": f"{llm_score}%",
+            "Explanation": explanation[:250] + "..." if len(explanation) > 250 else explanation
+        })
         
-        st.download_button("📄 Download PDF Report", create_pdf(), "Moura_Tender_Report.pdf", "application/pdf")
-
-with tab2:
-    st.header("Add or Edit Tenderer")
-    with st.form("add_form"):
-        name = st.text_input("Tenderer Name *")
-        abn = st.text_input("ABN")
-        price = st.number_input("Total Price Exc GST ($)", min_value=0.0, step=1000.0, format="%.0f")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1: exp = st.slider("Experience (0-100)", 0, 100, 70)
-        with col2: und = st.slider("Understanding & Resources", 0, 100, 70)
-        with col3: man = st.slider("QES Management", 0, 100, 70)
-        with col4: loc = st.slider("Local Content", 0, 100, 80)
-        notes = st.text_area("Notes")
-        if st.form_submit_button("Save Tenderer"):
-            if name:
-                new_row = pd.DataFrame([{
-                    'Tenderer': name, 'ABN': abn, 'Total Price Exc GST': price,
-                    'Experience Score': exp, 'Understanding Score': und,
-                    'Management Score': man, 'Local Content Score': loc,
-                    'Notes': notes, 'Last Updated': datetime.now().strftime("%Y-%m-%d %H:%M")
-                }])
-                st.session_state.tenderers = pd.concat([df, new_row], ignore_index=True)
-                st.success(f"✅ {name} saved")
-                st.rerun()
-
-with tab3:
-    st.header("Upload Schedule K1 Excel")
-    tenderer_sel = st.selectbox("Select Tenderer", df['Tenderer'].tolist() if len(df) > 0 else ["New"])
-    uploaded = st.file_uploader("Upload K1 Excel", type=["xlsx"])
-    if uploaded and st.button("Parse Price"):
-        try:
-            xls = pd.ExcelFile(uploaded)
-            summary = pd.read_excel(xls, 'Summary', header=None)
-            total = None
-            for _, row in summary.iterrows():
-                if isinstance(row[0], str) and "Total Excluding GST" in str(row[0]):
-                    total = float(row[4])
-                    break
-            if total:
-                st.success(f"✅ Parsed: **${total:,.0f}**")
-                if tenderer_sel != "New":
-                    idx = df[df['Tenderer'] == tenderer_sel].index[0]
-                    df.at[idx, 'Total Price Exc GST'] = total
-                    st.session_state.tenderers = df
-                    st.rerun()
-        except:
-            st.error("Could not parse file")
-
-with tab4:
-    st.header("Part 6 Compliance Checklist")
-    items = ["Tender Form signed", "Schedule A1 Details", "Schedule A3 Conflict of Interest", "Schedule B1 Financials",
-             "Schedule C Insurances", "Schedule D Local Content", "Schedule E Experience", "Schedule F1 Key Personnel",
-             "Schedule G Resources", "Schedule H1 WHS", "Schedule H2 Environmental", "Schedule H3 Quality",
-             "Schedule I Methodology", "Schedule J Program", "Schedule K1 Pricing", "Schedule K3 Variation Rates",
-             "Schedule L Departures"]
-    for item in items:
-        st.checkbox(item, key=item)
-
-st.sidebar.success("✅ App ready — add all your tenders now!")
-st.sidebar.caption("Password: banana2026\nCouncil Estimate: $3,247,850")
+        progress_bar.progress((i + 1) / len(uploaded))
+    
+    df = pd.DataFrame(results)
+    st.dataframe(df, use_container_width=True, height=700)
+    
+    # Side-by-Side Comparison
+    st.subheader("🔍 Side-by-Side Comparison")
+    selected = st.multiselect("Select tenders to compare (max 4)", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:3])
+    if selected:
+        compare_df = df[df["Tender Name"].isin(selected)].set_index("Tender Name")
+        st.dataframe(compare_df, use_container_width=True)
+    
+    st.download_button("📥 Download Results CSV", df.to_csv(index=False), "tender_evaluation_results.csv", "text/csv")
+    
+    st.success(f"✅ Evaluated {len(uploaded)} tenders with LLM deep scoring")
