@@ -8,8 +8,8 @@ import json
 import time
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v3.6")
-st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nSimple Mode: max 3 documents • Detailed Mode: multiple per schedule")
+st.title("🍌 Banana Shire Council Tender Evaluator v3.7")
+st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nSimple Mode: unlimited documents • Detailed Mode: multiple per schedule")
 
 # Official Weightings
 criteria_weighting = {
@@ -57,7 +57,7 @@ schedules = [
 if 'tenders' not in st.session_state:
     st.session_state.tenders = {}
 
-mode = st.radio("Upload Mode", ["Simple Mode (max 3 documents)", "Detailed Mode (per schedule)"], horizontal=True)
+mode = st.radio("Upload Mode", ["Simple Mode (unlimited documents)", "Detailed Mode (per schedule)"], horizontal=True)
 
 groq_key = st.text_input("Groq API Key", type="password")
 
@@ -130,15 +130,11 @@ if st.button("Add Tender") and new_name.strip():
 # Upload Section
 for tender in list(st.session_state.tenders.keys()):
     with st.expander(f"📂 {tender}", expanded=True):
-        if mode == "Simple Mode (max 3 documents)":
-            files = st.file_uploader("Upload up to 3 main documents", 
+        if mode == "Simple Mode (unlimited documents)":
+            files = st.file_uploader("Upload documents (unlimited)", 
                                    key=f"simple_{tender}", 
                                    accept_multiple_files=True)
-            # Limit to maximum 3
-            limited_files = files[:3] if files else []
-            st.session_state.tenders[tender]["Main Documents"] = limited_files
-            if len(files or []) > 3:
-                st.warning("Only the first 3 files were kept (maximum allowed)")
+            st.session_state.tenders[tender]["Main Documents"] = files if files else []
         else:
             for sched in schedules:
                 files = st.file_uploader(f"{sched} (multiple allowed)", 
