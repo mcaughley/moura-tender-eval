@@ -11,8 +11,8 @@ import time
 from fpdf import FPDF
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v2.4")
-st.markdown("**T2526.25 DRFA Moura – Part 6 Checklist**  \nUpload ZIPs or multiple files")
+st.title("🍌 Banana Shire Council Tender Evaluator v2.5")
+st.markdown("**T2526.25 DRFA Moura – Part 6 Checklist**  \nUpload ZIP files or multiple files")
 
 checklist = {
     "Tender Form": "Signed offer, price, program",
@@ -54,7 +54,7 @@ def extract_text_from_file(file_path):
 def llm_deep_score(full_text, tender_name):
     if not groq_key:
         return 0, {}, "No API key"
-    prompt = f"""Evaluate this tender response against the Part 6 checklist.
+    prompt = f"""Evaluate this tender against the Part 6 checklist.
 
 Checklist:
 {chr(10).join([f"- {k}: {v}" for k, v in checklist.items()])}
@@ -97,8 +97,7 @@ Return ONLY valid JSON:
             time.sleep(1)
     return 0, {}, "LLM failed after retries"
 
-# Upload
-uploaded = st.file_uploader("Upload ZIP files (one tender per ZIP) or multiple files", 
+uploaded = st.file_uploader("Upload ZIP files or multiple files", 
                            accept_multiple_files=True, type=['zip', 'pdf', 'xlsx', 'docx'])
 
 if uploaded and groq_key:
@@ -135,58 +134,43 @@ if uploaded and groq_key:
     
     df = pd.DataFrame(results)
     
-    # Automatic Ranking with Colour Coding
+    # Automatic Ranking
     st.subheader("🏆 Automatic Ranking")
     ranked_df = df.sort_values(by="Overall Score", ascending=False).reset_index(drop=True)
     ranked_df["Rank"] = ranked_df.index + 1
+    st.dataframe(ranked_df[["Rank", "Tender Name", "Overall Score", "Explanation"]], 
+                 use_container_width=True, height=600)
     
-    # Safe styling with fallback
-    try:
-        styled = ranked_df.style.background_gradient(subset=["Overall Score"], cmap="RdYlGn")
-    except:
-        styled = ranked_df.style
-    
-    st.dataframe(styled.format({"Overall Score": "{:.1f}"}), use_container_width=True, height=600)
-    
-    # Side-by-side + Per-Category Table
-    st.subheader("🔍 Detailed Comparison")
+    # Per-Category Table
+    st.subheader("📋 Per-Category Scoring")
     selected = st.multiselect("Select tenders to compare", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:4])
-    
     if selected:
         compare_df = df[df["Tender Name"].isin(selected)]
-        st.dataframe(compare_df, use_container_width=True)
-        
-        st.subheader("📋 Per-Category Scoring Table")
         cat_df = compare_df[["Tender Name"] + list(checklist.keys())].set_index("Tender Name")
-        try:
-            styled_cat = cat_df.style.background_gradient(cmap="RdYlGn", axis=None)
-        except:
-            styled_cat = cat_df
-        st.dataframe(styled_cat.format("{:.1f}"), use_container_width=True)
+        st.dataframe(cat_df, use_container_width=True)
+    
+    # PDF Export (Simple & Safe)
+    if st.button("📄 Export Comparison Report as PDF") and selected:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, "Banana Shire Council Tender Comparison Report", ln=True, align="C")
+        pdf.ln(10)
         
-        # PDF Export
-        if st.button("📄 Export Full Comparison Report as PDF"):
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 16)
-            pdf.cell(0, 10, "Banana Shire Council Tender Comparison Report", ln=True, align="C")
-            pdf.ln(10)
-            pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 10, "Ranked Results", ln=True)
-            for _, row in ranked_df.iterrows():
-                pdf.cell(0, 8, f"Rank {row['Rank']}: {row['Tender Name']} - {row['Overall Score']}%", ln=True)
-            
-            pdf.ln(10)
-            pdf.cell(0, 10, "Per-Category Scores", ln=True)
-            pdf.set_font("Arial", "", 10)
-            for cat in checklist.keys():
-                pdf.cell(0, 8, f"{cat}:", ln=True)
-                for t in selected:
-                    score = compare_df.loc[compare_df["Tender Name"] == t, cat].values[0]
-                    pdf.cell(0, 8, f"   {t}: {score}/10", ln=True)
-            
-            pdf.output("comparison_report.pdf")
-            with open("comparison_report.pdf", "rb") as f:
-                st.download_button("Download PDF Report", f, "comparison_report.pdf", "application/pdf")
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 10, "Ranked Results", ln=True)
+        for _, row in ranked_df.iterrows():
+            pdf.cell(0, 8, f"Rank {row['Rank']}: {row['Tender Name']} - {row['Overall Score']}%", ln=True)
+        
+        pdf.ln(10)
+        pdf.cell(0, 10, "Selected Tenders Summary", ln=True)
+        pdf.set_font("Arial", "", 10)
+        for t in selected:
+            score = df.loc[df["Tender Name"] == t, "Overall Score"].values[0]
+            pdf.cell(0, 8, f"{t}: {score}%", ln=True)
+        
+        pdf.output("comparison_report.pdf")
+        with open("comparison_report.pdf", "rb") as f:
+            st.download_button("Download PDF Report", f, "comparison_report.pdf", "application/pdf")
     
     st.success(f"✅ Evaluated {len(uploaded)} tenders")
