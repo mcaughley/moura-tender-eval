@@ -7,17 +7,18 @@ import zipfile
 from pathlib import Path
 from groq import Groq
 import json
+import time
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v2.0")
-st.markdown("**T2526.25 DRFA Moura – Part 6 Response Schedules Checklist**  \nUpload ZIP files (one tender per ZIP) or individual files")
+st.title("🍌 Banana Shire Council Tender Evaluator v2.1")
+st.markdown("**T2526.25 DRFA Moura – Part 6 Response Schedules**  \nUpload ZIP files (one tender per ZIP) or individual files")
 
-# Official Part 6 Checklist
+# Checklist
 checklist = {
     "Tender Form": "Signed offer, price, program",
     "A1-A4": "Details, Conflict, Legal, Privacy",
     "B1-B2": "Solvency & Financial Statements",
-    "C1-C2": "Insurances (WorkCover, PL, Construction)",
+    "C1-C2": "Insurances",
     "D1-D3": "Local Content, Employment, Environmental",
     "E1-E3": "Experience, Past Projects, Resources",
     "F1-F2": "Key Personnel CVs & Allocation + Subs",
@@ -25,7 +26,7 @@ checklist = {
     "H": "Methodology",
     "I": "Program / Gantt",
     "J1-J3": "Pricing, Cash Flow, Variation Rates",
-    "K-O": "Technical Data, Departures, Additional, WHS Scheme, QLD Code"
+    "K-O": "Technical Data, Departures, Additional Info"
 }
 
 groq_key = st.text_input("Groq API Key (for LLM deep scoring)", type="password")
@@ -48,39 +49,55 @@ def extract_text_from_file(file_path):
             text = file_path.read_text(encoding="utf-8", errors="ignore")
     except:
         pass
-    return text.lower()
+    return text
 
-def llm_deep_score(full_text, tender_name):
+def llm_deep_score(full_text, tender_name, retries=2):
     if not groq_key:
-        return 0, "No API key – LLM scoring disabled"
-    try:
-        client = Groq(api_key=groq_key)
-        prompt = f"""Evaluate this tender response for Banana Shire Council against the exact Part 6 checklist.
+        return 0, "No API key"
+    
+    prompt = f"""You are an expert tender evaluator for Banana Shire Council.
 
-Checklist:
+Evaluate the following tender response against the Part 6 checklist.
+
+Checklist items (score each 0-10):
 {chr(10).join([f"- {k}: {v}" for k, v in checklist.items()])}
 
-Tender: {tender_name}
-Text: {full_text[:12000]}
+Tender Name: {tender_name}
+Text: {full_text[:15000]}
 
-Return ONLY JSON:
+Return **ONLY** valid JSON in this exact format. Do not add any extra text:
+
 {{
-  "overall_score": 0-100,
-  "explanation": "brief 2-3 sentence summary"
-}}"""
+  "overall_score": number between 0 and 100,
+  "explanation": "Brief 2-3 sentence summary of strengths and weaknesses"
+}}
 
-        chat = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
-            temperature=0.1,
-            response_format={"type": "json_object"}
-        )
-        data = json.loads(chat.choices[0].message.content)
-        return data.get("overall_score", 0), data.get("explanation", "")
-    except Exception as e:
-        return 0, f"LLM error: {str(e)}"
+If the text is unclear or incomplete, still return valid JSON with your best estimate."""
 
-# Upload handler
+    for attempt in range(retries + 1):
+        try:
+            client = Groq(api_key=groq_key)
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+                temperature=0.0,
+                max_tokens=600,
+                response_format={"type": "json_object"}
+            )
+            
+            result = chat_completion.choices[0].message.content.strip()
+            data = json.loads(result)
+            
+            return data.get("overall_score", 0), data.get("explanation", "No explanation provided")
+            
+        except Exception as e:
+            if attempt == retries:
+                return 0, f"LLM failed after {retries+1} attempts: {str(e)[:100]}"
+            time.sleep(1)  # small delay before retry
+    
+    return 0, "Unknown error"
+
+# Upload
 uploaded = st.file_uploader("Upload ZIP files (one tender per ZIP) or individual files", 
                            accept_multiple_files=True, type=['zip', 'pdf', 'xlsx', 'docx'])
 
@@ -105,13 +122,12 @@ if uploaded and groq_key:
                     f.write(file.getbuffer())
                 full_text = extract_text_from_file(tmp_path / file.name)
         
-        # LLM Deep Score
         llm_score, explanation = llm_deep_score(full_text, tender_name)
         
         results.append({
             "Tender Name": tender_name,
             "LLM Deep Score": f"{llm_score}%",
-            "Explanation": explanation[:250] + "..." if len(explanation) > 250 else explanation
+            "Explanation": explanation[:300] + "..." if len(explanation) > 300 else explanation
         })
         
         progress_bar.progress((i + 1) / len(uploaded))
@@ -119,13 +135,13 @@ if uploaded and groq_key:
     df = pd.DataFrame(results)
     st.dataframe(df, use_container_width=True, height=700)
     
-    # Side-by-Side Comparison
+    # Side-by-side comparison
     st.subheader("🔍 Side-by-Side Comparison")
-    selected = st.multiselect("Select tenders to compare (max 4)", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:3])
+    selected = st.multiselect("Select tenders to compare", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:3])
     if selected:
         compare_df = df[df["Tender Name"].isin(selected)].set_index("Tender Name")
         st.dataframe(compare_df, use_container_width=True)
     
     st.download_button("📥 Download Results CSV", df.to_csv(index=False), "tender_evaluation_results.csv", "text/csv")
     
-    st.success(f"✅ Evaluated {len(uploaded)} tenders with LLM deep scoring")
+    st.success(f"✅ Evaluated {len(uploaded)} tenders with improved LLM prompt")
