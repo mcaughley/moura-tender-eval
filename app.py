@@ -8,10 +8,19 @@ import json
 import time
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v3.1")
-st.markdown("**T2526.25 DRFA Moura – Part 6 Response Schedules**")
+st.title("🍌 Banana Shire Council Tender Evaluator v3.5")
+st.markdown("**T2526.25 DRFA Moura – Official Weighted Evaluation**  \nMultiple files per schedule • Detailed Per-Criteria Breakdown")
 
-# Exact Schedule Titles from Criteria
+# Official Criteria & Weightings from RFT Part 2
+criteria_weighting = {
+    "Price": 50,
+    "Experience & Capability": 10,
+    "Demonstrated Understanding & Resources": 15,
+    "Quality, Environmental, Safety & Management": 15,
+    "Local Content": 10
+}
+
+# All schedules from Part 6
 schedules = [
     "Tender Form",
     "Schedule A – Respondent’s Details, Conflict of Interest and Legal Matters",
@@ -48,9 +57,9 @@ schedules = [
 if 'tenders' not in st.session_state:
     st.session_state.tenders = {}
 
-mode = st.radio("Upload Mode", ["Simple Mode (One Document per Tender)", "Detailed Mode (One File per Schedule)"], horizontal=True)
+mode = st.radio("Upload Mode", ["Simple Mode (One Main Document)", "Detailed Mode (Per Schedule)"], horizontal=True)
 
-groq_key = st.text_input("Groq API Key (for LLM scoring)", type="password")
+groq_key = st.text_input("Groq API Key", type="password")
 
 def extract_text(file):
     text = ""
@@ -72,18 +81,32 @@ def extract_text(file):
         pass
     return text
 
-def llm_deep_score(text, tender_name):
+def llm_deep_score(full_text, tender_name):
     if not groq_key:
         return 0, {}, "No API key"
-    # Robust prompt
-    prompt = f"""Evaluate this tender response against the Banana Shire Council Part 6 checklist.
+    prompt = f"""You are an expert tender evaluator for Banana Shire Council.
+
+Evaluate this tender against the official criteria and weightings:
+
+- Price (50%)
+- Experience & Capability (10%)
+- Demonstrated Understanding & Resources (15%)
+- Quality, Environmental, Safety & Management (15%)
+- Local Content (10%)
 
 Tender: {tender_name}
-Text: {text[:14000]}
+Text: {full_text[:14000]}
 
 Return ONLY valid JSON:
 {{
   "overall_score": 0-100,
+  "criteria_scores": {{
+    "Price": 0-100,
+    "Experience & Capability": 0-100,
+    "Demonstrated Understanding & Resources": 0-100,
+    "Quality, Environmental, Safety & Management": 0-100,
+    "Local Content": 0-100
+  }},
   "explanation": "brief summary"
 }}"""
     try:
@@ -95,47 +118,87 @@ Return ONLY valid JSON:
             response_format={"type": "json_object"}
         )
         data = json.loads(chat.choices[0].message.content)
-        return data.get("overall_score", 0), {}, data.get("explanation", "")
+        return data.get("overall_score", 0), data.get("criteria_scores", {}), data.get("explanation", "")
     except:
         return 0, {}, "LLM error"
 
 # Add Tender
-new_name = st.text_input("Tender Name")
-if st.button("Add Tender") and new_name:
+new_name = st.text_input("New Tender Name")
+if st.button("Add Tender") and new_name.strip():
     if new_name not in st.session_state.tenders:
-        st.session_state.tenders[new_name] = {}
+        st.session_state.tenders[new_name] = {sched: [] for sched in schedules}
         st.success(f"Added {new_name}")
 
 # Upload Section
 for tender in list(st.session_state.tenders.keys()):
     with st.expander(f"📂 {tender}", expanded=True):
-        if mode == "Simple Mode (One Document per Tender)":
-            file = st.file_uploader("Upload main document for this tender", key=f"simple_{tender}")
-            st.session_state.tenders[tender] = {"Main Document": file}
+        if mode == "Simple Mode (One Main Document)":
+            file = st.file_uploader("Upload main document", key=f"simple_{tender}")
+            st.session_state.tenders[tender]["Main Document"] = [file] if file else []
         else:
             for sched in schedules:
-                file = st.file_uploader(f"{sched}", key=f"{tender}_{sched}")
-                st.session_state.tenders[tender][sched] = file
+                files = st.file_uploader(f"{sched} (multiple files allowed)", 
+                                       key=f"{tender}_{sched}", 
+                                       accept_multiple_files=True)
+                st.session_state.tenders[tender][sched] = files if files else []
 
 # Evaluate
 if st.button("🚀 Evaluate All Tenders", type="primary"):
-    results = []
-    for tender, files in st.session_state.tenders.items():
-        full_text = ""
-        for name, file in files.items():
-            if file:
-                full_text += f"\n\n=== {name} ===\n" + extract_text(file) + "\n"
+    if not st.session_state.tenders:
+        st.error("No tenders added")
+    else:
+        results = []
+        progress = st.progress(0)
         
-        score, item_scores, expl = llm_deep_score(full_text, tender)
+        for idx, (tender_name, schedules_dict) in enumerate(st.session_state.tenders.items()):
+            full_text = ""
+            for sched, file_list in schedules_dict.items():
+                if file_list:
+                    full_text += f"\n\n=== {sched} ===\n"
+                    for file in file_list:
+                        full_text += extract_text(file) + "\n"
+            
+            llm_score, criteria_scores, expl = llm_deep_score(full_text, tender_name)
+            
+            # Calculate Official Weighted Score
+            weighted = sum((criteria_scores.get(crit, 0) / 100) * weight 
+                          for crit, weight in criteria_weighting.items())
+            
+            row = {
+                "Tender Name": tender_name,
+                "Weighted Score": round(weighted, 1),
+                "LLM Overall": llm_score,
+                "Explanation": expl[:300] + "..." if len(expl) > 300 else expl,
+                **criteria_scores  # Add all criteria scores as columns
+            }
+            results.append(row)
+            progress.progress((idx + 1) / len(st.session_state.tenders))
         
-        row = {"Tender Name": tender, "Overall Score": score, "Explanation": expl}
-        results.append(row)
-    
-    df = pd.DataFrame(results)
-    ranked = df.sort_values("Overall Score", ascending=False).reset_index(drop=True)
-    ranked["Rank"] = ranked.index + 1
-    
-    st.subheader("🏆 Final Ranking")
-    st.dataframe(ranked[["Rank", "Tender Name", "Overall Score", "Explanation"]], use_container_width=True)
-    
-    st.download_button("📥 Download Results CSV", df.to_csv(index=False), "evaluation_results.csv", "text/csv")
+        df = pd.DataFrame(results)
+        ranked = df.sort_values("Weighted Score", ascending=False).reset_index(drop=True)
+        ranked["Rank"] = ranked.index + 1
+        
+        st.subheader("🏆 Final Ranking (Official Weighting)")
+        st.dataframe(ranked[["Rank", "Tender Name", "Weighted Score", "LLM Overall", "Explanation"]], 
+                     use_container_width=True, height=600)
+        
+        # Detailed Per-Criteria Breakdown
+        st.subheader("📊 Detailed Per-Criteria Breakdown")
+        selected = st.multiselect("Select tenders to compare", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:4])
+        if selected:
+            compare_df = df[df["Tender Name"].isin(selected)]
+            breakdown_cols = ["Tender Name"] + list(criteria_weighting.keys())
+            breakdown = compare_df[breakdown_cols].set_index("Tender Name")
+            st.dataframe(breakdown.style.format("{:.1f}"), use_container_width=True)
+            
+            # Weighted Contribution
+            st.subheader("Weighted Contribution (%)")
+            contrib = {}
+            for crit, weight in criteria_weighting.items():
+                contrib[crit] = compare_df[crit] * (weight / 100)
+            contrib_df = pd.DataFrame(contrib, index=compare_df["Tender Name"])
+            st.dataframe(contrib_df.style.format("{:.1f}"), use_container_width=True)
+        
+        st.download_button("📥 Download Full Results CSV", df.to_csv(index=False), "evaluation_results.csv", "text/csv")
+        
+        st.success("✅ Evaluation complete with official weighting and detailed breakdown")
