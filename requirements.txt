@@ -4,5 +4,3 @@ pandas
 openpyxl
 python-docx
 groq
-fpdf2
-matplotlib
