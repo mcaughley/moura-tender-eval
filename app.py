@@ -8,38 +8,49 @@ import json
 import time
 
 st.set_page_config(page_title="Tender Evaluator", layout="wide")
-st.title("🍌 Banana Shire Council Tender Evaluator v3.0")
-st.markdown("**T2526.25 DRFA Moura – Part 6 Checklist**  \nAdd tenders and upload one file per category")
+st.title("🍌 Banana Shire Council Tender Evaluator v3.1")
+st.markdown("**T2526.25 DRFA Moura – Part 6 Response Schedules**")
 
-checklist = [
+# Exact Schedule Titles from Criteria
+schedules = [
     "Tender Form",
-    "A1-A4",
-    "B1-B2",
-    "C1-C2",
-    "D1-D3",
-    "E1-E3",
-    "F1-F2",
-    "G1-G3",
-    "H",
-    "I",
-    "J1-J3",
-    "K-O"
+    "Schedule A – Respondent’s Details, Conflict of Interest and Legal Matters",
+    "Schedule A1 – Respondent’s Details",
+    "Schedule A2 – Respondent’s Further Details",
+    "Schedule A3 – Conflict of Interest",
+    "Schedule A4 – Legal MattersPrivacy and Data Management",
+    "Schedule B – Solvency and Financial Details",
+    "Schedule B1 – Solvency of Respondent",
+    "Schedule B2 – Financial Details of Respondent",
+    "Schedule C – Insurances",
+    "Schedule C1 - Insurances",
+    "Schedule C2 – Additional Insurances",
+    "Schedule D – Business Profile (Local Content, Employment and Environmental)",
+    "Schedule D1 – Local Content",
+    "Schedule D2 – Employment",
+    "Schedule D3 – Environmental",
+    "Schedule E – Experience and Capability of Respondent",
+    "Schedule E1 – Similar Engagements Currently Underway",
+    "Schedule E2 – Past Similar Engagements",
+    "Schedule E3 – Resources",
+    "Schedule F – Experience and Capability of Respondent’s Key Personnel, Subcontractors, Suppliers and Consultants",
+    "Schedule G – Management Systems",
+    "Schedule H – Methodology",
+    "Schedule I – Program",
+    "Schedule J – Pricing, Cash Flow and Variation Rates",
+    "Schedule K – Technical Data",
+    "Schedule L – Statement of Departures",
+    "Schedule M – Additional Information",
+    "Schedule N – Australian Government Work Health and Safety Accreditation Scheme",
+    "Schedule O – Queensland Code of Practice for the Building and Construction Industry"
 ]
 
 if 'tenders' not in st.session_state:
     st.session_state.tenders = {}
 
-# Add new tender
-col1, col2 = st.columns([3,1])
-with col1:
-    new_name = st.text_input("New Tender Name")
-with col2:
-    if st.button("Add Tender", type="primary") and new_name.strip():
-        if new_name not in st.session_state.tenders:
-            st.session_state.tenders[new_name] = {cat: None for cat in checklist}
-            st.success(f"Added: {new_name}")
+mode = st.radio("Upload Mode", ["Simple Mode (One Document per Tender)", "Detailed Mode (One File per Schedule)"], horizontal=True)
 
-groq_key = st.text_input("Groq API Key", type="password")
+groq_key = st.text_input("Groq API Key (for LLM scoring)", type="password")
 
 def extract_text(file):
     text = ""
@@ -64,36 +75,17 @@ def extract_text(file):
 def llm_deep_score(text, tender_name):
     if not groq_key:
         return 0, {}, "No API key"
+    # Robust prompt
     prompt = f"""Evaluate this tender response against the Banana Shire Council Part 6 checklist.
 
-Checklist items:
-{chr(10).join(checklist)}
-
 Tender: {tender_name}
-
-Text:
-{text[:14000]}
+Text: {text[:14000]}
 
 Return ONLY valid JSON:
 {{
-  "overall_score": number 0-100,
-  "item_scores": {{
-    "Tender Form": 0-10,
-    "A1-A4": 0-10,
-    "B1-B2": 0-10,
-    "C1-C2": 0-10,
-    "D1-D3": 0-10,
-    "E1-E3": 0-10,
-    "F1-F2": 0-10,
-    "G1-G3": 0-10,
-    "H": 0-10,
-    "I": 0-10,
-    "J1-J3": 0-10,
-    "K-O": 0-10
-  }},
-  "explanation": "short summary"
+  "overall_score": 0-100,
+  "explanation": "brief summary"
 }}"""
-
     try:
         client = Groq(api_key=groq_key)
         chat = client.chat.completions.create(
@@ -103,51 +95,47 @@ Return ONLY valid JSON:
             response_format={"type": "json_object"}
         )
         data = json.loads(chat.choices[0].message.content)
-        return data.get("overall_score", 0), data.get("item_scores", {}), data.get("explanation", "")
-    except Exception as e:
-        return 0, {}, f"Error: {str(e)[:100]}"
+        return data.get("overall_score", 0), {}, data.get("explanation", "")
+    except:
+        return 0, {}, "LLM error"
 
-# Show uploaders for each tender
+# Add Tender
+new_name = st.text_input("Tender Name")
+if st.button("Add Tender") and new_name:
+    if new_name not in st.session_state.tenders:
+        st.session_state.tenders[new_name] = {}
+        st.success(f"Added {new_name}")
+
+# Upload Section
 for tender in list(st.session_state.tenders.keys()):
-    with st.expander(f"📂 {tender}", expanded=False):
-        for cat in checklist:
-            uploaded_file = st.file_uploader(f"{cat}", key=f"{tender}_{cat}", type=['pdf','xlsx','docx','doc'])
-            if uploaded_file:
-                st.session_state.tenders[tender][cat] = uploaded_file
+    with st.expander(f"📂 {tender}", expanded=True):
+        if mode == "Simple Mode (One Document per Tender)":
+            file = st.file_uploader("Upload main document for this tender", key=f"simple_{tender}")
+            st.session_state.tenders[tender] = {"Main Document": file}
+        else:
+            for sched in schedules:
+                file = st.file_uploader(f"{sched}", key=f"{tender}_{sched}")
+                st.session_state.tenders[tender][sched] = file
 
-# Evaluate button
+# Evaluate
 if st.button("🚀 Evaluate All Tenders", type="primary"):
-    if not st.session_state.tenders:
-        st.error("No tenders added")
-    else:
-        results = []
-        progress = st.progress(0)
-        for idx, (tender_name, files) in enumerate(st.session_state.tenders.items()):
-            full_text = ""
-            for cat, file in files.items():
-                if file:
-                    full_text += f"\n\n=== {cat} ===\n" + extract_text(file) + "\n"
-            
-            score, item_scores, expl = llm_deep_score(full_text, tender_name)
-            
-            row = {"Tender Name": tender_name, "Overall Score": score, "Explanation": expl}
-            row.update(item_scores)
-            results.append(row)
-            progress.progress((idx+1) / len(st.session_state.tenders))
+    results = []
+    for tender, files in st.session_state.tenders.items():
+        full_text = ""
+        for name, file in files.items():
+            if file:
+                full_text += f"\n\n=== {name} ===\n" + extract_text(file) + "\n"
         
-        df = pd.DataFrame(results)
+        score, item_scores, expl = llm_deep_score(full_text, tender)
         
-        st.subheader("🏆 Final Ranking")
-        ranked = df.sort_values("Overall Score", ascending=False).reset_index(drop=True)
-        ranked["Rank"] = ranked.index + 1
-        st.dataframe(ranked[["Rank", "Tender Name", "Overall Score", "Explanation"]], use_container_width=True)
-        
-        st.subheader("📋 Per-Category Scores")
-        selected = st.multiselect("Select tenders", df["Tender Name"].tolist(), default=df["Tender Name"].tolist()[:3])
-        if selected:
-            cat_df = df[df["Tender Name"].isin(selected)][["Tender Name"] + checklist].set_index("Tender Name")
-            st.dataframe(cat_df, use_container_width=True)
-        
-        st.download_button("📥 Download Full Results CSV", df.to_csv(index=False), "tender_evaluation_results.csv", "text/csv")
-
-st.caption("v3.0 - Separate file uploads per category per tender")
+        row = {"Tender Name": tender, "Overall Score": score, "Explanation": expl}
+        results.append(row)
+    
+    df = pd.DataFrame(results)
+    ranked = df.sort_values("Overall Score", ascending=False).reset_index(drop=True)
+    ranked["Rank"] = ranked.index + 1
+    
+    st.subheader("🏆 Final Ranking")
+    st.dataframe(ranked[["Rank", "Tender Name", "Overall Score", "Explanation"]], use_container_width=True)
+    
+    st.download_button("📥 Download Results CSV", df.to_csv(index=False), "evaluation_results.csv", "text/csv")
